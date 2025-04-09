@@ -3,7 +3,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { HfInference } = require('@huggingface/inference');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const axios = require('axios');
 
 // Init express
 const app = express();
@@ -15,17 +15,31 @@ const voicedFile = path.resolve("./resources/voicedby.wav");
 
 // Initialize APIs
 const hf = new HfInference(process.env.HF_TOKEN);
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-
-// State
 let shouldDownloadFile = false;
 
-// Middleware
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-
 // Audio Processing Functions
+async function generateGeminiResponse(text) {
+    try {
+        const response = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+            {
+                contents: [{
+                    parts: [{ text }]
+                }]
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data.candidates[0].content.parts[0].text;
+    } catch (error) {
+        console.error('Gemini API Error:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
 async function speechToTextAPI() {
     try {
         const fileStats = await fs.promises.stat(recordFile);
@@ -68,6 +82,10 @@ async function GptResponsetoSpeech(text) {
         shouldDownloadFile = false;
     }
 }
+
+// Middleware
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
 // Routes
 app.post('/uploadAudio', (req, res) => {
@@ -117,11 +135,7 @@ app.post('/uploadAudio', (req, res) => {
             
             console.log('Transcription successful:', transcription);
             
-            const result = await model.generateContent({
-                contents: [{ parts: [{ text: transcription }] }]
-            });
-            
-            const aiResponse = result.response.text();
+            const aiResponse = await generateGeminiResponse(transcription);
             console.log('AI Response:', aiResponse);
             
             await GptResponsetoSpeech(aiResponse);
@@ -168,11 +182,7 @@ app.post('/sendText', async (req, res) => {
         
         console.log('User Input:', userText);
         
-        const result = await model.generateContent({
-            contents: [{ parts: [{ text: userText }] }]
-        });
-        
-        const aiResponse = result.response.text();
+        const aiResponse = await generateGeminiResponse(userText);
         console.log('AI Response:', aiResponse);
         
         await GptResponsetoSpeech(aiResponse);

@@ -1,41 +1,78 @@
-/**
- * @brief Voice assistant. Server side NodeJS.
- * @author Yurii Mykhailov
- * @copyright GPLv3
- */
-
-// include libs
+require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { HfInference } = require('@huggingface/inference');
-const config = require('./config');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // Init express
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 // Path to files
 const recordFile = path.resolve("./resources/recording.wav");
 const voicedFile = path.resolve("./resources/voicedby.wav");
 
-// API Key and settings
-const hfToken = config.hfToken;
+// Initialize APIs
+const hf = new HfInference(process.env.HF_TOKEN);
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+
+// State
 let shouldDownloadFile = false;
-const maxTokens = 30;
 
-// Init HuggingFace
-const hf = new HfInference(hfToken);
-
-// Middleware for data processing in a "multipart/form-data" format 
+// Middleware
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Handler for loading an audio file
+// Audio Processing Functions
+async function speechToTextAPI() {
+    try {
+        const fileStats = await fs.promises.stat(recordFile);
+        if (fileStats.size === 0) throw new Error('Audio file is empty');
+
+        const audioData = await fs.promises.readFile(recordFile);
+        const transcription = await hf.automaticSpeechRecognition({
+            data: audioData,
+            model: "openai/whisper-base",
+            parameters: {
+                return_timestamps: false,
+                language: "en"
+            }
+        });
+        console.log('YOU:', transcription.text);
+        return transcription.text;
+    } catch (error) {
+        console.error('Error in speechToTextAPI:', error);
+        return null;
+    }
+}
+
+async function GptResponsetoSpeech(text) {
+    try {
+        if (!fs.existsSync('./resources')) {
+            fs.mkdirSync('./resources');
+        }
+
+        const response = await hf.textToSpeech({
+            model: 'espnet/kan-bayashi_ljspeech_vits',
+            inputs: text.trim()
+        });
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+        await fs.promises.writeFile(voicedFile, buffer);
+        shouldDownloadFile = true;
+        console.log('Audio generated successfully');
+    } catch (error) {
+        console.error("Error in text-to-speech:", error);
+        shouldDownloadFile = false;
+    }
+}
+
+// Routes
 app.post('/uploadAudio', (req, res) => {
     shouldDownloadFile = false;
     
-    // Ensure resources directory exists
     if (!fs.existsSync('./resources')) {
         fs.mkdirSync('./resources');
     }
@@ -43,7 +80,7 @@ app.post('/uploadAudio', (req, res) => {
     let dataReceived = false;
     const recordingFile = fs.createWriteStream(recordFile, { 
         encoding: 'binary',
-        flags: 'w' // Overwrite existing file
+        flags: 'w'
     });
     
     recordingFile.on('error', (err) => {
@@ -70,7 +107,6 @@ app.post('/uploadAudio', (req, res) => {
             return res.status(400).send('No audio data received');
         }
 
-        // Wait for file to be fully written
         await new Promise(resolve => setTimeout(resolve, 100));
 
         try {
@@ -78,142 +114,51 @@ app.post('/uploadAudio', (req, res) => {
             if (!transcription) {
                 return res.status(500).send('Speech recognition failed');
             }
+            
             console.log('Transcription successful:', transcription);
+            
+            const result = await model.generateContent({
+                contents: [{ parts: [{ text: transcription }] }]
+            });
+            
+            const aiResponse = result.response.text();
+            console.log('AI Response:', aiResponse);
+            
+            await GptResponsetoSpeech(aiResponse);
             res.status(200).send(transcription);
-            await callGPT(transcription);
         } catch (error) {
-            console.error('Audio processing error:', error);
-            res.status(500).send('Error processing audio');
+            console.error('Processing error:', error);
+            res.status(500).send('Error processing request');
         }
     });
 });
 
-// Handler for checking the value of a variable
 app.get('/checkVariable', (req, res) => {
-	res.json({ ready: shouldDownloadFile });
+    res.json({ ready: shouldDownloadFile });
 });
 
-// File upload handler
 app.get('/broadcastAudio', (req, res) => {
-
-	fs.stat(voicedFile, (err, stats) => {
-		if (err) {
-			console.error('File not found');
-			res.sendStatus(404);
-			return;
-		}
-
-		res.writeHead(200, {
-			'Content-Type': 'audio/wav',
-			'Content-Length': stats.size
-		});
-
-		const readStream = fs.createReadStream(voicedFile);
-		readStream.pipe(res);
-
-		readStream.on('end', () => {
-			//console.log('File has been sent successfully');
-		});
-
-		readStream.on('error', (err) => {
-			console.error('Error reading file', err);
-			res.sendStatus(500);
-		});
-	});
-});
-
-// Starting the server
-app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}/`);
-});
-
-// Remove these duplicate lines:
-// const { HfInference } = require('@huggingface/inference');
-// const hf = new HfInference(config.hfToken);
-
-// Keep existing functions
-async function speechToTextAPI() {
-    try {
-        const fileStats = await fs.promises.stat(recordFile);
-        if (fileStats.size === 0) {
-            throw new Error('Audio file is empty');
+    fs.stat(voicedFile, (err, stats) => {
+        if (err) {
+            console.error('File not found');
+            return res.sendStatus(404);
         }
 
-        const audioData = await fs.promises.readFile(recordFile);
-        const transcription = await hf.automaticSpeechRecognition({
-            data: audioData,
-            model: "openai/whisper-base",
-            parameters: {
-                return_timestamps: false,
-                language: "en"
-            }
-        });
-        console.log('YOU:', transcription.text);
-        return transcription.text;
-    } catch (error) {
-        console.error('Error in speechToTextAPI:', error);
-        return null;
-    }
-}
-
-async function callGPT(text) {
-    try {
-        if (!text) return null;
-        const response = await hf.textGeneration({
-            inputs: `Answer briefly: ${text}`,
-            model: "gpt2",
-            parameters: {
-                max_new_tokens: 50,
-                temperature: 0.5,
-                return_full_text: false,
-                repetition_penalty: 1.2
-            }
+        res.writeHead(200, {
+            'Content-Type': 'audio/wav',
+            'Content-Length': stats.size
         });
 
-        const aiResponse = response.generated_text;
-        console.log('AI:', aiResponse);
-        
-        await GptResponsetoSpeech(aiResponse);
-        return aiResponse;
-    } catch (error) {
-        console.error('Error calling AI:', error);
-        return null;
-    }
-}
+        const readStream = fs.createReadStream(voicedFile);
+        readStream.pipe(res);
 
-async function GptResponsetoSpeech(text) {
-    try {
-        if (!fs.existsSync('./resources')) {
-            fs.mkdirSync('./resources');
-        }
-
-        const response = await hf.textToSpeech({
-            model: 'espnet/kan-bayashi_ljspeech_vits',
-            inputs: text.trim()
+        readStream.on('error', (err) => {
+            console.error('Error reading file', err);
+            res.sendStatus(500);
         });
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-        await fs.promises.writeFile(voicedFile, buffer);
-        shouldDownloadFile = true;
-        console.log('Audio generated successfully');
-    } catch (error) {
-        console.error("Error in text-to-speech:", error);
-        shouldDownloadFile = false;
-    }
-}
-
-// Add this with your other route handlers
-// Add at the top with other requires
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
-// Update Gemini initialization
-const genAI = new GoogleGenerativeAI(config.geminiApiKey);
-const model = genAI.getGenerativeModel({ 
-    model: "gemini-2.0-flash",  // Updated model name
-    apiVersion: "v1beta"  // Specify API version
+    });
 });
 
-// Update the sendText endpoint
 app.post('/sendText', async (req, res) => {
     try {
         const userText = req.body.text;
@@ -224,15 +169,12 @@ app.post('/sendText', async (req, res) => {
         console.log('User Input:', userText);
         
         const result = await model.generateContent({
-            contents: [{
-                parts: [{ text: userText }]
-            }]
+            contents: [{ parts: [{ text: userText }] }]
         });
         
-        const response = await result.response;
-        const aiResponse = response.text();
-        
+        const aiResponse = result.response.text();
         console.log('AI Response:', aiResponse);
+        
         await GptResponsetoSpeech(aiResponse);
         
         res.status(200).json({ 
@@ -243,4 +185,9 @@ app.post('/sendText', async (req, res) => {
         console.error('Error processing text:', error);
         res.status(500).send('Error processing request: ' + error.message);
     }
+});
+
+// Start server
+app.listen(port, () => {
+    console.log(`Server running at http://localhost:${port}/`);
 });

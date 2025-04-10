@@ -84,67 +84,59 @@ async function GptResponsetoSpeech(text) {
 }
 
 // Middleware
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use((req, res, next) => {
+    const contentType = req.headers['content-type'] || '';
+    
+    if (req.path === '/uploadAudio' || contentType.includes('audio') || contentType.includes('application/octet-stream')) {
+        const data = [];
+        req.on('data', chunk => data.push(chunk));
+        req.on('end', () => {
+            req.rawBody = Buffer.concat(data);
+            next();
+        });
+        req.on('error', (err) => {
+            console.error('Error receiving data:', err);
+            res.status(500).send('Error receiving audio data');
+        });
+    } else {
+        express.json({ limit: '50mb' })(req, res, next);
+    }
+});
 
-// Routes
-app.post('/uploadAudio', (req, res) => {
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Update the uploadAudio route
+app.post('/uploadAudio', async (req, res) => {
     shouldDownloadFile = false;
     
     if (!fs.existsSync('./resources')) {
         fs.mkdirSync('./resources');
     }
 
-    let dataReceived = false;
-    const recordingFile = fs.createWriteStream(recordFile, { 
-        encoding: 'binary',
-        flags: 'w'
-    });
-    
-    recordingFile.on('error', (err) => {
-        console.error('Error writing file:', err);
-        res.status(500).send('Error saving audio file');
-    });
-
-    req.on('error', (err) => {
-        console.error('Error receiving data:', err);
-        res.status(500).send('Error receiving audio data');
-    });
-
-    req.on('data', (data) => {
-        dataReceived = true;
-        console.log('Receiving audio chunk, size:', data.length);
-        recordingFile.write(data);
-    });
-
-    req.on('end', async () => {
-        recordingFile.end();
-        
-        if (!dataReceived) {
-            console.error('No audio data received');
+    try {
+        if (!req.rawBody) {
             return res.status(400).send('No audio data received');
         }
 
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await fs.promises.writeFile(recordFile, req.rawBody);
+        console.log('Audio file saved, size:', req.rawBody.length);
 
-        try {
-            const transcription = await speechToTextAPI();
-            if (!transcription) {
-                return res.status(500).send('Speech recognition failed');
-            }
-            
-            console.log('Transcription successful:', transcription);
-            
-            const aiResponse = await generateGeminiResponse(transcription);
-            console.log('AI Response:', aiResponse);
-            
-            await GptResponsetoSpeech(aiResponse);
-            res.status(200).send(transcription);
-        } catch (error) {
-            console.error('Processing error:', error);
-            res.status(500).send('Error processing request');
+        const transcription = await speechToTextAPI();
+        if (!transcription) {
+            return res.status(500).send('Speech recognition failed');
         }
-    });
+        
+        console.log('Transcription successful:', transcription);
+        
+        const aiResponse = await generateGeminiResponse(transcription);
+        console.log('AI Response:', aiResponse);
+        
+        await GptResponsetoSpeech(aiResponse);
+        res.status(200).send(transcription);
+    } catch (error) {
+        console.error('Error processing audio:', error);
+        res.status(500).send('Error processing audio');
+    }
 });
 
 app.get('/checkVariable', (req, res) => {

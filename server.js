@@ -24,19 +24,23 @@ async function generateGeminiResponse(text) {
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
             {
                 contents: [{
-                    parts: [{ text }]
-                }]
+                    parts: [{ 
+                        text: `Please provide a brief and concise response (maximum 50 words) to: ${text}`
+                    }]
+                }],
+                generationConfig: {
+                    maxOutputTokens: 100,
+                    temperature: 0.7
+                }
             },
             {
-                headers: {
-                    'Content-Type': 'application/json'
-                }
+                headers: { 'Content-Type': 'application/json' }
             }
         );
         return response.data.candidates[0].content.parts[0].text;
     } catch (error) {
         console.error('Gemini API Error:', error.response?.data || error.message);
-        throw error;
+        return "I apologize, but I couldn't process that request.";
     }
 }
 
